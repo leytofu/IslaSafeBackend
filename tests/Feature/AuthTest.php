@@ -46,6 +46,43 @@ class AuthTest extends TestCase
             ->assertJsonValidationErrors(['email']);
     }
 
+    public function test_login_reports_each_role_so_the_web_can_gate_access(): void
+    {
+        // The web dashboard gate depends on the role being present in the
+        // login payload — non-admin roles must never be able to open it.
+        $campManager = $this->makeUser(User::ROLE_CAMP_MANAGER);
+
+        $this->postJson('/api/auth/login', [
+            'email' => $campManager->email,
+            'password' => 'secret-password',
+        ])->assertOk()->assertJsonPath('user.role', User::ROLE_CAMP_MANAGER);
+
+        $resident = $this->makeUser(User::ROLE_RESIDENT);
+
+        $this->postJson('/api/auth/login', [
+            'email' => $resident->email,
+            'password' => 'secret-password',
+        ])->assertOk()->assertJsonPath('user.role', User::ROLE_RESIDENT);
+    }
+
+    public function test_register_cannot_assign_admin_role(): void
+    {
+        // Self-registration always yields the least-privileged role; admin
+        // accounts are provisioned through the authorized seeding process.
+        $this->postJson('/api/auth/register', [
+            'name' => 'Privilege Escalation',
+            'email' => 'escalate@example.test',
+            'password' => 'password123',
+            'password_confirmation' => 'password123',
+            'role' => User::ROLE_ADMIN,
+        ])->assertCreated()->assertJsonPath('user.role', User::ROLE_RESIDENT);
+
+        $this->assertDatabaseHas('users', [
+            'email' => 'escalate@example.test',
+            'role' => User::ROLE_RESIDENT,
+        ]);
+    }
+
     public function test_register_creates_resident_account_with_token(): void
     {
         $response = $this->postJson('/api/auth/register', [

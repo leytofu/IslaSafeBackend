@@ -22,7 +22,15 @@ class DatabaseSeeder extends Seeder
     public function run(): void
     {
         $accounts = [
-            ['name' => 'MDRRMO Administrator', 'email' => 'admin@islasafe.test', 'role' => User::ROLE_ADMIN, 'password' => 'TempAdmin123!'],
+            [
+                'name' => 'MDRRMO Administrator',
+                'email' => 'admin@islasafe.test',
+                'role' => User::ROLE_ADMIN,
+                'password' => 'TempAdmin123!',
+                'contact_number' => '+63 912 345 6789',
+                'office' => 'MDRRMO Office, Carlos P. Garcia',
+                'jurisdiction' => 'CPG, Bohol — 23 barangays',
+            ],
             ['name' => 'Evacuation Camp Manager', 'email' => 'camp@islasafe.test', 'role' => User::ROLE_CAMP_MANAGER],
             ['name' => 'Resident Demo Account', 'email' => 'resident@islasafe.test', 'role' => User::ROLE_RESIDENT],
         ];

@@ -45,6 +45,18 @@ class SosRequestTest extends TestCase
             ->assertForbidden();
     }
 
+    public function test_camp_manager_can_list_sos_requests_for_future_mobile(): void
+    {
+        // Reusable backend rule: the future camp manager mobile app shares
+        // this endpoint. The admin web remains admin-only at the UI layer.
+        $this->makeSosRequest();
+
+        $this->actingAs($this->makeUser(User::ROLE_CAMP_MANAGER), 'sanctum')
+            ->getJson('/api/sos-requests')
+            ->assertOk()
+            ->assertJsonCount(1, 'data');
+    }
+
     public function test_admin_sees_requests_newest_first_with_generated_codes(): void
     {
         $older = $this->makeSosRequest(['received_at' => now()->subDays(3)]);
@@ -116,6 +128,16 @@ class SosRequestTest extends TestCase
         $this->actingAs($this->makeUser(User::ROLE_RESIDENT), 'sanctum')
             ->patchJson("/api/sos-requests/{$sos->id}", ['status' => 'Resolved'])
             ->assertForbidden();
+    }
+
+    public function test_updating_sos_status_requires_authentication(): void
+    {
+        $sos = $this->makeSosRequest();
+
+        $this->patchJson("/api/sos-requests/{$sos->id}", ['status' => 'Coming'])
+            ->assertUnauthorized();
+
+        $this->assertDatabaseHas('sos_requests', ['id' => $sos->id, 'status' => 'Pending']);
     }
 
     public function test_invalid_status_value_is_rejected(): void

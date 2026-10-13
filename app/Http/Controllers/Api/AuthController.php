@@ -7,6 +7,7 @@ use App\Models\User;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\ValidationException;
 
 class AuthController extends Controller
@@ -63,6 +64,47 @@ class AuthController extends Controller
     }
 
     /**
+     * PATCH /api/auth/profile — update the signed-in user's profile.
+     *
+     * Name, email, contact number, office, and jurisdiction are editable.
+     * An optional avatar image (JPG/PNG, max 2 MB) may be uploaded; it is
+     * stored on the public disk and the previous file is removed. Role and
+     * password are intentionally NOT accepted here — role is assigned by
+     * the administrator and password changes go through the OTP recovery
+     * flow or a dedicated endpoint.
+     */
+    public function updateProfile(Request $request): JsonResponse
+    {
+        $user = $request->user();
+
+        $data = $request->validate([
+            'name' => ['required', 'string', 'max:255'],
+            'email' => ['required', 'email', 'max:255', 'unique:users,email,'.$user->id],
+            'contact_number' => ['nullable', 'string', 'max:32'],
+            'office' => ['nullable', 'string', 'max:255'],
+            'jurisdiction' => ['nullable', 'string', 'max:255'],
+            'avatar' => ['nullable', 'image', 'mimes:jpg,jpeg,png', 'max:2048'],
+        ]);
+
+        if ($request->hasFile('avatar')) {
+            // Replace the previous photo (if any) to avoid orphaned files.
+            if ($user->avatar) {
+                Storage::disk('public')->delete($user->avatar);
+            }
+            $data['avatar'] = $request->file('avatar')->store('avatars', 'public');
+        } else {
+            unset($data['avatar']);
+        }
+
+        $user->update($data);
+
+        return response()->json([
+            'message' => 'Profile updated successfully.',
+            'user' => $this->userPayload($user->fresh()),
+        ]);
+    }
+
+    /**
      * POST /api/auth/logout — revokes the token used for the request.
      */
     public function logout(Request $request): JsonResponse
@@ -89,6 +131,10 @@ class AuthController extends Controller
             'name' => $user->name,
             'email' => $user->email,
             'role' => $user->role,
+            'contact_number' => $user->contact_number,
+            'office' => $user->office,
+            'jurisdiction' => $user->jurisdiction,
+            'avatar_url' => $user->avatar ? Storage::disk('public')->url($user->avatar) : null,
         ];
     }
 }
