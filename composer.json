@@ -34,6 +34,10 @@
         }
     },
     "scripts": {
+        "serve:lan": [
+            "Composer\\Config::disableProcessTimeout",
+            "@php artisan serve --host=0.0.0.0 --port=8000"
+        ],
         "setup": [
             "composer install",
             "@php -r \"file_exists('.env') || copy('.env.example', '.env');\"",

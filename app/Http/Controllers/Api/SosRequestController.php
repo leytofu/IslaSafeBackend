@@ -38,10 +38,10 @@ class SosRequestController extends Controller
             'category' => ['required', 'in:Medical,Flood assistance,Evacuation'],
             'priority' => ['required', 'in:Critical,High,Medium'],
             'description' => ['required', 'string', 'max:2000'],
-            'status' => ['sometimes', 'in:Pending,Coming,Resolved'],
         ]);
 
-        $data['status'] ??= SosRequest::STATUS_PENDING;
+        // Emergency reporters cannot bypass the administrator's triage queue.
+        $data['status'] = SosRequest::STATUS_PENDING;
         $data['received_at'] = now();
 
         $sosRequest = SosRequest::create($data);
@@ -50,7 +50,7 @@ class SosRequestController extends Controller
     }
 
     /**
-     * PATCH /api/sos-requests/{id} — admin/campmanager status updates.
+     * PATCH /api/sos-requests/{id} — administrator status updates.
      */
     public function update(Request $request, SosRequest $sosRequest): JsonResponse
     {

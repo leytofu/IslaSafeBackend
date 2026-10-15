@@ -12,7 +12,7 @@ class DatabaseSeeder extends Seeder
     use WithoutModelEvents;
 
     /**
-     * Seed the demo accounts for each role plus the starter SOS queue.
+     * Seed the demo accounts for each role.
      *
      * Passwords:
      *   admin@islasafe.test      -> TempAdmin123!   (temporary admin password)
@@ -42,6 +42,5 @@ class DatabaseSeeder extends Seeder
             );
         }
 
-        $this->call(SosRequestSeeder::class);
     }
 }

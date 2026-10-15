@@ -96,6 +96,25 @@ class SosRequestTest extends TestCase
             ->assertJsonValidationErrors(['contact', 'latitude', 'category', 'priority']);
     }
 
+    public function test_resident_submission_is_received_by_admin_and_can_be_resolved(): void
+    {
+        $submission = $this->actingAs($this->makeUser(User::ROLE_RESIDENT), 'sanctum')
+            ->postJson('/api/sos-requests', [
+                'name' => 'Resident emergency', 'contact' => '09170000000',
+                'location' => 'Pitogo', 'latitude' => 10.109, 'longitude' => 124.562,
+                'type' => 'Medical emergency', 'category' => 'Medical', 'priority' => 'Critical',
+                'description' => 'Resident needs assistance.', 'status' => 'Resolved',
+            ])->assertCreated()->assertJsonPath('data.status', 'Pending');
+        $id = $submission->json('data.id');
+        $this->actingAs($this->makeUser(User::ROLE_ADMIN), 'sanctum')
+            ->getJson('/api/sos-requests')->assertOk()->assertJsonPath('data.0.id', $id);
+        $this->patchJson("/api/sos-requests/{$id}", ['status' => 'Coming'])
+            ->assertOk()->assertJsonPath('data.status', 'Coming');
+        $this->patchJson("/api/sos-requests/{$id}", ['status' => 'Resolved'])
+            ->assertOk()->assertJsonPath('data.status', 'Resolved');
+        $this->assertDatabaseHas('sos_requests', ['id' => $id, 'status' => 'Resolved']);
+    }
+
     public function test_admin_can_update_sos_status(): void
     {
         $sos = $this->makeSosRequest();
