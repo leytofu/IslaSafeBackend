@@ -68,7 +68,9 @@ class PasswordResetController extends Controller
             return $this->deliveryUnavailable();
         }
 
-        $user = User::where('email', $email)->first();
+        // A Google-only account must reauthenticate with Google before its
+        // first local password is set. Email recovery cannot bypass that step.
+        $user = User::where('email', $email)->whereNotNull('password')->first();
 
         // Always return generic response to prevent enumeration
         $genericResponse = [
@@ -326,7 +328,7 @@ class PasswordResetController extends Controller
                 return Hash::check($data['reset_token'], $auth->reset_token_hash);
             });
 
-        if (! $authorization) {
+        if (! $authorization || ! $authorization->user?->password) {
             return response()->json([
                 'success' => false,
                 'message' => 'This password reset request is invalid or has expired. Please restart the password recovery process.',

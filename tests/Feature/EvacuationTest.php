@@ -55,6 +55,61 @@ class EvacuationTest extends TestCase
         return $this->actingAs($this->manager)->postJson('/api/camp/registrations', $this->body($extra));
     }
 
+    public function test_admin_grouped_roster_covers_age_boundaries_and_all_recorded_genders(): void
+    {
+        foreach ([0, 12, 13, 17, 18, 59, 60, 125, null] as $index => $age) {
+            $this->register(['full_name' => 'Person '.$index, 'reported_age' => $age, 'gender' => $age === null ? 'unspecified' : ($index % 2 ? 'female' : 'male')])->assertCreated();
+        }
+        $this->actingAs($this->admin)->getJson('/api/admin/evacuation/centers/'.$this->center->id.'/grouped-registrations')
+            ->assertOk()->assertJsonPath('total', 9)
+            ->assertJsonPath('data.0.title', 'Children')->assertJsonPath('data.0.total', 2)
+            ->assertJsonPath('data.0.genders.0.data.0.age', 0)->assertJsonPath('data.0.genders.1.data.0.age', 12)
+            ->assertJsonPath('data.1.title', 'Teens')->assertJsonPath('data.1.total', 2)
+            ->assertJsonPath('data.2.title', 'Adults')->assertJsonPath('data.2.total', 4)
+            ->assertJsonPath('data.3.title', 'Unknown age')->assertJsonPath('data.3.genders.2.data.0.gender', 'unspecified');
+    }
+
+    public function test_admin_grouped_roster_paginates_each_gender_without_losing_totals(): void
+    {
+        $this->center->update(['capacity' => 100]);
+        for ($i = 0; $i < 26; $i++) {
+            $this->register(['full_name' => sprintf('Child %02d', $i), 'reported_age' => 8, 'gender' => 'male'])->assertCreated();
+        }
+        $this->register(['full_name' => 'Female child', 'reported_age' => 9, 'gender' => 'female'])->assertCreated();
+        $path = '/api/admin/evacuation/centers/'.$this->center->id.'/grouped-registrations';
+        $this->actingAs($this->admin)->getJson($path)->assertOk()->assertJsonPath('total', 27)
+            ->assertJsonCount(25, 'data.0.genders.0.data')->assertJsonPath('data.0.genders.0.total', 26);
+        $this->getJson($path.'?children_male_page=2')->assertOk()->assertJsonCount(1, 'data.0.genders.0.data')
+            ->assertJsonPath('data.0.genders.0.data.0.full_name', 'Child 25')->assertJsonPath('data.0.genders.0.total', 26)
+            ->assertJsonPath('data.0.genders.1.current_page', 1)->assertJsonCount(1, 'data.0.genders.1.data');
+        $this->getJson($path.'?children_male_page=0')->assertUnprocessable();
+    }
+
+    public function test_admin_grouped_roster_filters_and_stays_within_center_and_active_event(): void
+    {
+        $kept = $this->register(['full_name' => 'Visible child', 'reported_age' => 10, 'gender' => 'female'])->assertCreated()->json('data.registration.id');
+        $other = EvacuationCenter::create(['name' => 'Other Center', 'place_id' => $this->place->id]);
+        $moved = $this->register(['full_name' => 'Another center'])->assertCreated()->json('data.registration.id');
+        EvacuationRegistration::findOrFail($moved)->update(['center_id' => $other->id]);
+        $past = EvacuationEvent::create(['name' => 'Past event', 'started_at' => now()->subDay(), 'ended_at' => now(), 'status' => 'closed']);
+        $historical = $this->register(['full_name' => 'Historical person'])->assertCreated()->json('data.registration.id');
+        EvacuationRegistration::findOrFail($historical)->update(['event_id' => $past->id]);
+        EvacuationRegistration::findOrFail($kept)->update(['status' => 'checked_out']);
+        $path = '/api/admin/evacuation/centers/'.$this->center->id.'/grouped-registrations';
+        $this->actingAs($this->admin)->getJson($path)->assertOk()->assertJsonPath('total', 1)->assertJsonCount(1, 'places');
+        $this->getJson($path.'?status=checked_in')->assertOk()->assertJsonPath('total', 0);
+        $this->getJson($path.'?q=Visible&status=checked_out&place_id='.$this->place->id)->assertOk()->assertJsonPath('total', 1);
+        $this->getJson($path.'?q=Missing')->assertOk()->assertJsonPath('total', 0);
+    }
+
+    public function test_grouped_roster_requires_an_admin_session(): void
+    {
+        $path = '/api/admin/evacuation/centers/'.$this->center->id.'/grouped-registrations';
+        $this->getJson($path)->assertUnauthorized();
+        $this->actingAs($this->manager)->getJson($path)->assertForbidden();
+        $this->actingAs(User::factory()->create(['role' => 'residents']))->getJson($path)->assertForbidden();
+    }
+
     public function test_registers_real_event_history_and_demographics(): void
     {
         $result = $this->register()->assertCreated()->assertJsonPath('data.person.total_evacuations', 1)->assertJsonPath('data.center.current', 1)->assertJsonPath('data.center.demographics.gender.non_binary', 1)->assertJsonPath('data.center.demographics.age.adults', 1);
@@ -226,7 +281,9 @@ class EvacuationTest extends TestCase
 
     public function test_websocket_failure_keeps_committed_registration_available_for_refresh(): void
     {
-        Event::listen(EvacuationCenterUpdated::class, function () { throw new \RuntimeException('Simulated socket outage'); });
+        Event::listen(EvacuationCenterUpdated::class, function () {
+            throw new \RuntimeException('Simulated socket outage');
+        });
         $this->register()->assertCreated()->assertJsonPath('data.center.current', 1);
         $this->getJson('/api/camp/context')->assertOk()->assertJsonPath('data.center.registered', 1);
         $this->actingAs($this->admin)->getJson('/api/admin/evacuation/centers/'.$this->center->id)->assertOk()->assertJsonPath('data.current', 1)->assertJsonPath('data.demographics.age.adults', 1);

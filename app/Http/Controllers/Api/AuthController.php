@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\User;
+use App\Services\AuthSession;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
@@ -24,7 +25,7 @@ class AuthController extends Controller
 
         $user = User::where('email', $credentials['email'])->first();
 
-        if (! $user || ! Hash::check($credentials['password'], $user->password)) {
+        if (! $user || ! $user->password || ! Hash::check($credentials['password'], $user->password)) {
             throw ValidationException::withMessages([
                 'email' => ['The provided credentials do not match our records.'],
             ]);
@@ -35,7 +36,8 @@ class AuthController extends Controller
 
     /**
      * POST /api/auth/register — self-registration always starts at the
-     * least-privileged role ('residents'). Admin/campmanager accounts are seeded.
+     * least-privileged role ('residents'). Admins create Camp Managers through
+     * the protected team endpoint; administrator accounts are seeded.
      */
     public function register(Request $request): JsonResponse
     {
@@ -84,7 +86,13 @@ class AuthController extends Controller
             'office' => ['nullable', 'string', 'max:255'],
             'jurisdiction' => ['nullable', 'string', 'max:255'],
             'avatar' => ['nullable', 'image', 'mimes:jpg,jpeg,png', 'max:2048'],
+            'barangay' => ['sometimes', 'required', 'string', 'max:120'],
+            'address' => ['sometimes', 'required', 'string', 'max:500'],
         ]);
+
+        if ($user->google_subject && $data['email'] !== $user->email) {
+            throw ValidationException::withMessages(['email' => 'The email for a Google-linked account cannot be changed here.']);
+        }
 
         if ($request->hasFile('avatar')) {
             // Replace the previous photo (if any) to avoid orphaned files.
@@ -116,25 +124,11 @@ class AuthController extends Controller
 
     private function respondWithToken(User $user, int $status = 200): JsonResponse
     {
-        $token = $user->createToken('islasafe-admin-panel')->plainTextToken;
-
-        return response()->json([
-            'token' => $token,
-            'user' => $this->userPayload($user),
-        ], $status);
+        return AuthSession::respond($user, $status);
     }
 
     private function userPayload(User $user): array
     {
-        return [
-            'id' => $user->id,
-            'name' => $user->name,
-            'email' => $user->email,
-            'role' => $user->role,
-            'contact_number' => $user->contact_number,
-            'office' => $user->office,
-            'jurisdiction' => $user->jurisdiction,
-            'avatar_url' => $user->avatar ? Storage::disk('public')->url($user->avatar) : null,
-        ];
+        return AuthSession::payload($user);
     }
 }

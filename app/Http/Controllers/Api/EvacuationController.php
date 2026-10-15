@@ -84,6 +84,56 @@ class EvacuationController extends Controller
         return response()->json($query->latest('registered_at')->paginate(25));
     }
 
+    public function groupedRoster(Request $request, EvacuationCenter $center)
+    {
+        $ages = ['children' => ['Children', '0-12 years', 0, 12], 'teens' => ['Teens', '13-17 years', 13, 17],
+            'adults' => ['Adults', '18 years and above', 18, 125], 'unknown' => ['Unknown age', 'Age not recorded', null, null]];
+        $genders = ['male' => 'Male', 'female' => 'Female', 'other' => 'Other / unspecified'];
+        $rules = ['q' => ['nullable', 'string', 'max:120'], 'place_id' => ['nullable', 'integer'],
+            'status' => ['nullable', Rule::in(['checked_in', 'checked_out'])]];
+        foreach ($ages as $ageKey => $age) {
+            foreach ($genders as $genderKey => $gender) {
+                $rules[$ageKey.'_'.$genderKey.'_page'] = ['nullable', 'integer', 'min:1'];
+            }
+        }
+        $data = $request->validate($rules);
+        // This route is admin-only. Keep every query scoped to this center and
+        // the active event, including totals and independently paged groups.
+        $query = $this->operations->registrations($center)->with('place');
+        if (! empty($data['q'])) {
+            $query->where('full_name', 'like', '%'.str_replace(['%', '_'], ['\\%', '\\_'], $data['q']).'%');
+        }
+        foreach (['place_id', 'status'] as $filter) {
+            if (! empty($data[$filter])) {
+                $query->where($filter, $data[$filter]);
+            }
+        }
+        $groups = [];
+        foreach ($ages as $ageKey => [$title, $range, $minimum, $maximum]) {
+            $ageQuery = clone $query;
+            $minimum === null ? $ageQuery->whereNull('age') : $ageQuery->whereBetween('age', [$minimum, $maximum]);
+            $sections = [];
+            foreach ($genders as $genderKey => $genderTitle) {
+                $genderQuery = clone $ageQuery;
+                $genderKey === 'other' ? $genderQuery->whereNotIn('gender', ['male', 'female']) : $genderQuery->where('gender', $genderKey);
+                $pageName = $ageKey.'_'.$genderKey.'_page';
+                $page = $genderQuery->orderBy('full_name')->orderBy('id')->paginate(25, ['*'], $pageName, $data[$pageName] ?? 1);
+                if ($genderKey !== 'other' || $page->total() > 0) {
+                    $sections[] = ['key' => $genderKey, 'title' => $genderTitle, 'page_key' => $pageName,
+                        'data' => $page->items(), 'total' => $page->total(), 'current_page' => $page->currentPage(), 'last_page' => $page->lastPage()];
+                }
+            }
+            $total = array_sum(array_column($sections, 'total'));
+            if ($ageKey !== 'unknown' || $total > 0) {
+                $groups[] = ['key' => $ageKey, 'title' => $title, 'range' => $range, 'total' => $total, 'genders' => $sections];
+            }
+        }
+
+        $places = $this->operations->registrations($center)->select('place_id')->distinct()->with('place')->get()->pluck('place')->values();
+
+        return response()->json(['data' => $groups, 'total' => array_sum(array_column($groups, 'total')), 'event' => $this->operations->activeEvent(), 'places' => $places]);
+    }
+
     public function register(Request $request)
     {
         $data = $request->validate([...$this->personalRules(true), 'evacuee_id' => ['nullable', 'integer'], 'client_request_id' => ['required', 'uuid'],
@@ -228,6 +278,23 @@ class EvacuationController extends Controller
     public function updateCenter(Request $request, EvacuationCenter $center)
     {
         return $this->center($this->saveCenter($request, $center)->fresh());
+    }
+
+    public function deleteCenter(EvacuationCenter $center)
+    {
+        DB::transaction(function () use ($center) {
+            $locked = EvacuationCenter::whereKey($center->id)->lockForUpdate()->firstOrFail();
+            abort_if($locked->registrations()->where('status', 'checked_in')->exists(), 409, 'Check out or transfer occupants before deleting this center.');
+            $hasRegistrations = EvacuationRegistration::where('center_id', $locked->id)->orWhere('initial_center_id', $locked->id)->exists();
+            $hasMovements = EvacuationMovement::where('from_center_id', $locked->id)->orWhere('to_center_id', $locked->id)->exists();
+            abort_if($hasRegistrations || $hasMovements, 409, 'This center has evacuation history and cannot be deleted. Deactivate it to preserve evacuee records.');
+            // Release assignments, retaining the Camp Manager accounts.
+            $locked->assignments()->delete();
+            $locked->delete();
+            $this->operations->changed([$center->id], $this->operations->activeEvent()?->id);
+        }, 5);
+
+        return response()->json(['message' => 'Evacuation center deleted.']);
     }
 
     public function setup()

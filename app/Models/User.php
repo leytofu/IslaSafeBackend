@@ -7,12 +7,13 @@ use Database\Factories\UserFactory;
 use Illuminate\Database\Eloquent\Attributes\Fillable;
 use Illuminate\Database\Eloquent\Attributes\Hidden;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Laravel\Sanctum\HasApiTokens;
 
-#[Fillable(['name', 'email', 'password', 'role', 'contact_number', 'office', 'jurisdiction', 'avatar'])]
-#[Hidden(['password', 'remember_token'])]
+#[Fillable(['name', 'email', 'password', 'role', 'contact_number', 'office', 'jurisdiction', 'avatar', 'barangay', 'address'])]
+#[Hidden(['password', 'remember_token', 'google_subject'])]
 class User extends Authenticatable
 {
     public function campAssignment() { return $this->hasOne(CampAssignment::class); }
@@ -24,7 +25,7 @@ class User extends Authenticatable
     public const ROLE_RESIDENT = 'residents';
 
     /** @use HasFactory<UserFactory> */
-    use HasApiTokens, HasFactory, Notifiable;
+    use HasApiTokens, HasFactory, Notifiable, SoftDeletes;
 
     /**
      * Determine whether the user holds one of the given roles.

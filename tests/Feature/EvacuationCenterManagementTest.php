@@ -64,13 +64,49 @@ class EvacuationCenterManagementTest extends TestCase
         $center = EvacuationCenter::create(['name' => 'Existing', 'place_id' => $this->place->id]);
         $this->postJson('/api/admin/evacuation/centers', $this->centerData())->assertUnauthorized();
         $this->patchJson('/api/admin/evacuation/centers/'.$center->id, ['status' => 'Closed'])->assertUnauthorized();
+        $this->deleteJson('/api/admin/evacuation/centers/'.$center->id)->assertUnauthorized();
         foreach ([$this->manager, User::factory()->create(['role' => User::ROLE_RESIDENT])] as $user) {
             $this->actingAs($user)->postJson('/api/admin/evacuation/centers', $this->centerData())->assertForbidden();
             $this->patchJson('/api/admin/evacuation/centers/'.$center->id, ['name' => 'Changed'])->assertForbidden();
             $this->patchJson('/api/admin/evacuation/centers/'.$center->id, ['status' => 'Closed'])->assertForbidden();
+            $this->deleteJson('/api/admin/evacuation/centers/'.$center->id)->assertForbidden();
             $this->getJson('/api/admin/evacuation/map')->assertForbidden();
         }
         $this->assertSame('Existing', $center->fresh()->name);
+    }
+
+    public function test_deletes_unused_centers_and_releases_assignments_without_deleting_accounts(): void
+    {
+        Event::fake([EvacuationCenterUpdated::class]);
+        $id = $this->createCenter()->assertCreated()->json('data.id');
+        $this->deleteJson('/api/admin/evacuation/centers/'.$id)->assertOk()->assertJsonPath('message', 'Evacuation center deleted.');
+        $this->assertDatabaseMissing('evacuation_centers', ['id' => $id]);
+        $this->assertDatabaseMissing('camp_assignments', ['center_id' => $id]);
+        $this->assertDatabaseHas('users', ['id' => $this->manager->id, 'role' => User::ROLE_CAMP_MANAGER]);
+        $this->getJson('/api/admin/evacuation/centers')->assertJsonPath('total', 0);
+        $this->getJson('/api/evacuation-centers')->assertJsonCount(0, 'data');
+        $this->getJson('/api/admin/evacuation/centers/'.$id)->assertNotFound();
+        Event::assertDispatchedTimes(EvacuationCenterUpdated::class, 2);
+    }
+
+    public function test_deletion_preserves_occupants_and_checked_out_history(): void
+    {
+        $id = $this->createCenter()->assertCreated()->json('data.id');
+        $this->postJson('/api/admin/evacuation/events', ['name' => 'Deletion protection test'])->assertCreated();
+        $registration = $this->actingAs($this->manager)->postJson('/api/camp/registrations', [
+            'full_name' => 'Retained person', 'place_id' => $this->place->id, 'reported_age' => 18,
+            'gender' => 'female', 'client_request_id' => (string) Str::uuid(),
+        ])->assertCreated()->json('data.registration.id');
+        $this->actingAs($this->admin)->deleteJson('/api/admin/evacuation/centers/'.$id)->assertConflict();
+        $this->patchJson('/api/admin/evacuation/registrations/'.$registration, ['action' => 'check_out'])->assertOk();
+        $this->deleteJson('/api/admin/evacuation/centers/'.$id)->assertConflict()
+            ->assertJsonPath('message', 'This center has evacuation history and cannot be deleted. Deactivate it to preserve evacuee records.');
+        $this->assertDatabaseHas('evacuation_registrations', ['id' => $registration, 'center_id' => $id, 'status' => 'checked_out']);
+        $this->assertDatabaseHas('camp_assignments', ['center_id' => $id]);
+        $this->patchJson('/api/admin/evacuation/centers/'.$id, ['status' => 'Closed'])->assertOk();
+        $this->getJson('/api/evacuation-centers')->assertJsonCount(0, 'data');
+        $this->patchJson('/api/admin/evacuation/centers/'.$id, ['status' => 'Operational'])->assertOk();
+        $this->getJson('/api/evacuation-centers')->assertJsonCount(1, 'data');
     }
 
     public function test_required_fields_coordinates_and_manager_role_are_validated(): void
