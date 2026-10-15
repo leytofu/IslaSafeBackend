@@ -2,15 +2,12 @@
 
 namespace App\Notifications;
 
-use Illuminate\Bus\Queueable;
-use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Notifications\Messages\MailMessage;
 use Illuminate\Notifications\Notification;
+use Illuminate\Support\HtmlString;
 
-class OtpCodeNotification extends Notification implements ShouldQueue
+class OtpCodeNotification extends Notification
 {
-    use Queueable;
-
     public function __construct(
         public readonly string $otpCode,
         public readonly int $expiresInMinutes,
@@ -27,12 +24,12 @@ class OtpCodeNotification extends Notification implements ShouldQueue
 
         return (new MailMessage)
             ->subject("Your {$appName} Verification Code")
-            ->greeting("Hello!")
+            ->greeting('Hello!')
             ->line("You requested a password reset for your {$appName} account.")
-            ->line("Your verification code is:")
-            ->line("<strong style=\"font-size: 1.5rem; letter-spacing: 0.25em; font-family: monospace;\">{$this->otpCode}</strong>")
+            ->line('Your verification code is:')
+            ->line(new HtmlString("<strong style=\"font-size: 1.5rem; letter-spacing: 0.25em; font-family: monospace;\">{$this->otpCode}</strong>"))
             ->line("This code will expire in {$this->expiresInMinutes} minutes.")
-            ->line("If you did not request this, please ignore this email or contact support if you have concerns.")
+            ->line('If you did not request this, please ignore this email or contact support if you have concerns.')
             ->salutation("Stay safe,\nThe {$appName} Team");
     }
 

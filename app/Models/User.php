@@ -15,6 +15,8 @@ use Laravel\Sanctum\HasApiTokens;
 #[Hidden(['password', 'remember_token'])]
 class User extends Authenticatable
 {
+    public function campAssignment() { return $this->hasOne(CampAssignment::class); }
+    public function evacueeProfile() { return $this->hasOne(Evacuee::class); }
     public const ROLE_ADMIN = 'admin';
 
     public const ROLE_CAMP_MANAGER = 'campmanager';

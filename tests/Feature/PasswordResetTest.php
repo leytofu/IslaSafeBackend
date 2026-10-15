@@ -5,10 +5,16 @@ namespace Tests\Feature;
 use App\Models\PasswordResetAuthorization;
 use App\Models\PasswordResetChallenge;
 use App\Models\User;
+use App\Notifications\OtpCodeNotification;
+use App\Services\RecoveryMail;
 use Illuminate\Foundation\Testing\RefreshDatabase;
-use Illuminate\Support\Facades\DB;
+use Illuminate\Mail\Events\MessageSent;
+use Illuminate\Notifications\ChannelManager;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Notification;
+use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Str;
 use Tests\TestCase;
 
@@ -33,6 +39,7 @@ class PasswordResetTest extends TestCase
     {
         $otp = $notification->otpCode;
         $this->assertMatchesRegularExpression('/^\d{6}$/', $otp);
+
         return $otp;
     }
 
@@ -81,7 +88,7 @@ class PasswordResetTest extends TestCase
 
         $response->assertOk();
 
-        Notification::assertSentTo($user, \App\Notifications\OtpCodeNotification::class);
+        Notification::assertSentTo($user, OtpCodeNotification::class);
 
         $this->assertDatabaseHas('password_reset_challenges', [
             'user_id' => $user->id,
@@ -100,7 +107,7 @@ class PasswordResetTest extends TestCase
 
         $challengeId = $response->json('data.challenge_id');
 
-        $notification = collect(Notification::sent($user, \App\Notifications\OtpCodeNotification::class))->last();
+        $notification = collect(Notification::sent($user, OtpCodeNotification::class))->last();
         $otp = $this->extractOtpFromNotification($notification);
 
         $verifyResponse = $this->postJson('/api/forgot-password/verify-otp', [
@@ -267,7 +274,7 @@ class PasswordResetTest extends TestCase
 
         $challengeId = $response->json('data.challenge_id');
 
-        $notification = collect(Notification::sent($user, \App\Notifications\OtpCodeNotification::class))->last();
+        $notification = collect(Notification::sent($user, OtpCodeNotification::class))->last();
         $otp = $this->extractOtpFromNotification($notification);
 
         $verifyResponse = $this->postJson('/api/forgot-password/verify-otp', [
@@ -349,7 +356,7 @@ class PasswordResetTest extends TestCase
 
         $challengeId = $response->json('data.challenge_id');
 
-        $notification = collect(Notification::sent($user, \App\Notifications\OtpCodeNotification::class))->last();
+        $notification = collect(Notification::sent($user, OtpCodeNotification::class))->last();
         $otp = $this->extractOtpFromNotification($notification);
 
         $verifyResponse = $this->postJson('/api/forgot-password/verify-otp', [
@@ -381,7 +388,7 @@ class PasswordResetTest extends TestCase
 
         $challengeId = $response->json('data.challenge_id');
 
-        $notification = collect(Notification::sent($user, \App\Notifications\OtpCodeNotification::class))->last();
+        $notification = collect(Notification::sent($user, OtpCodeNotification::class))->last();
         $otp = $this->extractOtpFromNotification($notification);
 
         $verifyResponse = $this->postJson('/api/forgot-password/verify-otp', [
@@ -409,7 +416,7 @@ class PasswordResetTest extends TestCase
 
         $this->postJson('/api/forgot-password', ['email' => $user->email]);
 
-        $notification = collect(Notification::sent($user, \App\Notifications\OtpCodeNotification::class))->last();
+        $notification = collect(Notification::sent($user, OtpCodeNotification::class))->last();
         $otp = $this->extractOtpFromNotification($notification);
         $this->assertEquals(6, strlen($otp));
 
@@ -441,5 +448,82 @@ class PasswordResetTest extends TestCase
 
         $challenge->refresh();
         $this->assertEquals('consumed', $challenge->status);
+    }
+
+    public function test_recovery_mail_is_sent_without_a_queue_worker(): void
+    {
+        Notification::swap(new ChannelManager($this->app));
+        Queue::fake();
+        $user = $this->makeUser();
+        $sent = 0;
+        Mail::mailer()->getSymfonyTransport();
+        $this->app['events']->listen(MessageSent::class, function () use (&$sent) {
+            $sent++;
+        });
+
+        $this->postJson('/api/forgot-password', ['email' => $user->email])->assertOk();
+
+        $this->assertSame(1, $sent);
+        Queue::assertNothingPushed();
+    }
+
+    public function test_mail_transport_failure_does_not_claim_a_code_was_sent(): void
+    {
+        $this->mock(RecoveryMail::class)->shouldReceive('ensureReady')->andThrow(new \RuntimeException('SMTP unavailable'));
+        $user = $this->makeUser();
+
+        foreach ([$user->email, 'unknown@example.test'] as $email) {
+            $this->postJson('/api/forgot-password', ['email' => $email])
+                ->assertStatus(503)->assertJsonPath('success', false);
+        }
+        $this->assertDatabaseCount('password_reset_challenges', 0);
+        Notification::assertNothingSent();
+    }
+
+    public function test_initial_send_failure_invalidates_the_unsent_challenge(): void
+    {
+        $user = $this->makeUser();
+        Notification::shouldReceive('send')->once()->andThrow(new \RuntimeException('Delivery failed'));
+
+        $this->postJson('/api/forgot-password', ['email' => $user->email])->assertStatus(503);
+        $this->assertDatabaseHas('password_reset_challenges', ['user_id' => $user->id, 'status' => 'consumed']);
+    }
+
+    public function test_failed_resend_preserves_the_previous_code(): void
+    {
+        $user = $this->makeUser();
+        $response = $this->postJson('/api/forgot-password', ['email' => $user->email]);
+        $challenge = PasswordResetChallenge::where('challenge_id', $response->json('data.challenge_id'))->firstOrFail();
+        $notification = collect(Notification::sent($user, OtpCodeNotification::class))->last();
+        $code = $notification->otpCode;
+        $hash = $challenge->otp_hash;
+        $challenge->update(['resend_available_at' => now()->subSecond()]);
+        Notification::shouldReceive('send')->once()->andThrow(new \RuntimeException('Delivery failed'));
+
+        $this->postJson('/api/forgot-password/resend-otp', ['challenge_id' => $challenge->challenge_id])->assertStatus(503);
+        $this->assertSame($hash, $challenge->fresh()->otp_hash);
+        $this->postJson('/api/forgot-password/verify-otp', ['challenge_id' => $challenge->challenge_id, 'otp' => $code])->assertOk();
+    }
+
+    public function test_expired_challenge_cannot_be_resurrected_by_resend(): void
+    {
+        $user = $this->makeUser();
+        $challenge = PasswordResetChallenge::create([
+            'user_id' => $user->id,
+            'challenge_id' => Str::random(32),
+            'otp_hash' => Hash::make('123456'),
+            'otp_expires_at' => now()->subMinute(),
+            'status' => 'pending',
+        ]);
+        $this->postJson('/api/forgot-password/resend-otp', ['challenge_id' => $challenge->challenge_id])->assertStatus(410);
+        Notification::assertNothingSent();
+    }
+
+    public function test_unknown_email_receives_a_decoy_challenge_of_the_same_length(): void
+    {
+        RateLimiter::clear('password-reset:unknown@example.test');
+        $this->postJson('/api/forgot-password', ['email' => 'unknown@example.test'])
+            ->assertOk()->assertJsonPath('data.challenge_id', fn ($value) => is_string($value) && strlen($value) === 32);
+        $this->assertDatabaseCount('password_reset_challenges', 0);
     }
 }

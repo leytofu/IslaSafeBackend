@@ -16,7 +16,7 @@ class DatabaseSeeder extends Seeder
      *
      * Passwords:
      *   admin@islasafe.test      -> TempAdmin123!   (temporary admin password)
-     *   camp@islasafe.test       -> password
+     *   camp@islasafe.test       -> TempCamp123!   (temporary camp manager password)
      *   resident@islasafe.test   -> password
      */
     public function run(): void
@@ -31,7 +31,7 @@ class DatabaseSeeder extends Seeder
                 'office' => 'MDRRMO Office, Carlos P. Garcia',
                 'jurisdiction' => 'CPG, Bohol — 23 barangays',
             ],
-            ['name' => 'Evacuation Camp Manager', 'email' => 'camp@islasafe.test', 'role' => User::ROLE_CAMP_MANAGER],
+            ['name' => 'Evacuation Camp Manager', 'email' => 'camp@islasafe.test', 'role' => User::ROLE_CAMP_MANAGER, 'password' => 'TempCamp123!'],
             ['name' => 'Resident Demo Account', 'email' => 'resident@islasafe.test', 'role' => User::ROLE_RESIDENT],
         ];
 

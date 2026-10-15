@@ -7,6 +7,7 @@ use App\Models\PasswordResetAuthorization;
 use App\Models\PasswordResetChallenge;
 use App\Models\User;
 use App\Notifications\OtpCodeNotification;
+use App\Services\RecoveryMail;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
@@ -18,19 +19,26 @@ use Illuminate\Support\Str;
 
 class PasswordResetController extends Controller
 {
+    public function __construct(private readonly RecoveryMail $recoveryMail) {}
+
     private const OTP_LENGTH = 6;
+
     private const OTP_EXPIRY_MINUTES = 5;
+
     private const RESEND_COOLDOWN_SECONDS = 60;
+
     private const MAX_OTP_ATTEMPTS = 5;
+
     private const RESET_TOKEN_EXPIRY_MINUTES = 10;
+
     private const RATE_LIMIT_KEY_PREFIX = 'password-reset:';
 
     /**
      * POST /api/forgot-password
      *
      * Initiates a password recovery challenge by generating a 6-digit OTP,
-     * storing its hash, and emailing it to the user. Always returns a generic
-     * success response to prevent account enumeration.
+     * storing its hash, and emailing it immediately. Account lookup responses
+     * are generic; transport outages return a retryable service error.
      */
     public function requestOtp(Request $request): JsonResponse
     {
@@ -38,17 +46,26 @@ class PasswordResetController extends Controller
             'email' => ['required', 'email', 'max:255'],
         ]);
 
-        $email = $data['email'];
-        $rateLimitKey = self::RATE_LIMIT_KEY_PREFIX . $email;
+        $email = trim($data['email']);
+        $rateLimitKey = self::RATE_LIMIT_KEY_PREFIX.$email;
 
         // Rate limit: max 3 requests per hour per email
         if (RateLimiter::tooManyAttempts($rateLimitKey, 3)) {
             $seconds = RateLimiter::availableIn($rateLimitKey);
+
             return response()->json([
                 'success' => false,
                 'message' => 'Too many requests. Please try again later.',
-                'errors' => ['email' => ['Too many password reset requests. Please wait ' . $seconds . ' seconds.']],
+                'errors' => ['email' => ['Too many password reset requests. Please wait '.$seconds.' seconds.']],
             ], 429);
+        }
+
+        try {
+            $this->recoveryMail->ensureReady();
+        } catch (\Throwable $e) {
+            Log::error('Recovery mail transport unavailable', ['exception' => $e::class]);
+
+            return $this->deliveryUnavailable();
         }
 
         $user = User::where('email', $email)->first();
@@ -58,7 +75,7 @@ class PasswordResetController extends Controller
             'success' => true,
             'message' => 'If an account exists for this email, a verification code has been sent.',
             'data' => [
-                'challenge_id' => '',
+                'challenge_id' => Str::random(32),
                 'expires_in' => self::OTP_EXPIRY_MINUTES * 60,
                 'resend_available_in' => self::RESEND_COOLDOWN_SECONDS,
             ],
@@ -67,6 +84,7 @@ class PasswordResetController extends Controller
         if (! $user) {
             // Increment rate limiter even for non-existent emails to prevent enumeration
             RateLimiter::hit($rateLimitKey, 3600);
+
             return response()->json($genericResponse);
         }
 
@@ -104,9 +122,12 @@ class PasswordResetController extends Controller
         } catch (\Throwable $e) {
             Log::error('Failed to send OTP email', [
                 'user_id' => $user->id,
-                'error' => $e->getMessage(),
+                'exception' => $e::class,
             ]);
-            // Don't expose email failure to user
+            PasswordResetChallenge::where('challenge_id', $challengeId)->update(['status' => 'consumed']);
+            RateLimiter::hit($rateLimitKey, 3600);
+
+            return $this->deliveryUnavailable();
         }
 
         // Increment rate limiter
@@ -145,6 +166,7 @@ class PasswordResetController extends Controller
         // Check expiration
         if (Carbon::now()->gt($challenge->otp_expires_at)) {
             $challenge->update(['status' => 'expired']);
+
             return response()->json([
                 'success' => false,
                 'message' => 'This verification request has expired. Please request a new code.',
@@ -154,6 +176,7 @@ class PasswordResetController extends Controller
         // Check attempt limit
         if ($challenge->attempts >= self::MAX_OTP_ATTEMPTS) {
             $challenge->update(['status' => 'consumed']);
+
             return response()->json([
                 'success' => false,
                 'message' => 'Too many attempts. Please try again later.',
@@ -229,14 +252,21 @@ class PasswordResetController extends Controller
         // Check resend cooldown
         if ($challenge->resend_available_at && Carbon::now()->lt($challenge->resend_available_at)) {
             $seconds = Carbon::now()->diffInSeconds($challenge->resend_available_at, false);
+
             return response()->json([
                 'success' => false,
                 'message' => 'Please wait before requesting a new code.',
-                'errors' => ['challenge_id' => ['Please wait ' . $seconds . ' seconds before resending.']],
+                'errors' => ['challenge_id' => ['Please wait '.$seconds.' seconds before resending.']],
             ], 429);
         }
 
         $user = $challenge->user;
+
+        if (Carbon::now()->gte($challenge->otp_expires_at)) {
+            $challenge->update(['status' => 'expired']);
+
+            return response()->json(['success' => false, 'message' => 'This verification request has expired. Please request a new code.'], 410);
+        }
 
         // Generate new OTP
         $otp = random_int(100000, 999999);
@@ -244,22 +274,26 @@ class PasswordResetController extends Controller
         $expiresAt = Carbon::now()->addMinutes(self::OTP_EXPIRY_MINUTES);
         $resendAvailableAt = Carbon::now()->addSeconds(self::RESEND_COOLDOWN_SECONDS);
 
+        // Send new OTP
+        try {
+            $this->recoveryMail->ensureReady();
+            $user->notify(new OtpCodeNotification((string) $otp, self::OTP_EXPIRY_MINUTES));
+        } catch (\Throwable $e) {
+            Log::error('Failed to send OTP email on resend', [
+                'user_id' => $user->id,
+                'exception' => $e::class,
+            ]);
+
+            return $this->deliveryUnavailable();
+        }
+
+        // Preserve the previous working code if resending fails.
         $challenge->update([
             'otp_hash' => $otpHash,
             'otp_expires_at' => $expiresAt,
             'resend_available_at' => $resendAvailableAt,
             'attempts' => 0,
         ]);
-
-        // Send new OTP
-        try {
-            $user->notify(new OtpCodeNotification((string) $otp, self::OTP_EXPIRY_MINUTES));
-        } catch (\Throwable $e) {
-            Log::error('Failed to send OTP email on resend', [
-                'user_id' => $user->id,
-                'error' => $e->getMessage(),
-            ]);
-        }
 
         return response()->json([
             'success' => true,
@@ -327,5 +361,13 @@ class PasswordResetController extends Controller
                 'redirect_to' => '/login',
             ],
         ]);
+    }
+
+    private function deliveryUnavailable(): JsonResponse
+    {
+        return response()->json([
+            'success' => false,
+            'message' => 'We could not send a verification code right now. Please try again shortly.',
+        ], 503);
     }
 }
