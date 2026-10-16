@@ -1,14 +1,16 @@
 <?php
 
 use App\Http\Controllers\Api\AuthController;
+use App\Http\Controllers\Api\AdminHeaderController;
 use App\Http\Controllers\Api\EvacuationController;
 use App\Http\Controllers\Api\GoogleAuthController;
+use App\Http\Controllers\Api\IncidentController;
 use App\Http\Controllers\Api\PasswordResetController;
 use App\Http\Controllers\Api\SosRequestController;
 use App\Http\Controllers\Api\TeamController;
 use Illuminate\Support\Facades\Route;
 
-Route::post('/auth/login', [AuthController::class, 'login']);
+Route::post('/auth/login', [AuthController::class, 'login'])->middleware('throttle:10,1');
 Route::post('/auth/register', [AuthController::class, 'register']);
 Route::post('/auth/google/challenge', [GoogleAuthController::class, 'challenge'])->middleware('throttle:20,1');
 Route::post('/auth/google', [GoogleAuthController::class, 'login'])->middleware('throttle:20,1');
@@ -24,6 +26,26 @@ Route::post('/auth/forgot-password', [PasswordResetController::class, 'requestOt
 Route::post('/auth/reset-password', [PasswordResetController::class, 'reset']);
 
 Route::middleware('auth:sanctum')->group(function () {
+    Route::middleware('role:residents,campmanager')->group(function () {
+        Route::get('/advisories', [\App\Http\Controllers\Api\AdvisoryInboxController::class, 'index']);
+        Route::post('/advisories/{advisory}/read', [\App\Http\Controllers\Api\AdvisoryInboxController::class, 'markRead'])->middleware('throttle:120,1');
+    });
+    Route::prefix('admin/advisories')->middleware('role:admin')->group(function () {
+        Route::get('/', [\App\Http\Controllers\Api\AdvisoryController::class, 'index']);
+        Route::post('/', [\App\Http\Controllers\Api\AdvisoryController::class, 'store'])->middleware('throttle:30,1');
+        Route::patch('/{advisory}', [\App\Http\Controllers\Api\AdvisoryController::class, 'update'])->middleware('throttle:30,1');
+    });
+    Route::middleware('role:admin')->group(function () {
+        Route::get('/admin/search', [AdminHeaderController::class, 'search'])->middleware('throttle:120,1');
+        Route::get('/admin/notifications', [AdminHeaderController::class, 'notifications']);
+        Route::post('/admin/notifications/read', [AdminHeaderController::class, 'markRead']);
+    });
+    Route::prefix('admin/incidents')->middleware('role:admin')->group(function () {
+        Route::get('/statistics', [IncidentController::class, 'statistics']);
+        Route::get('/', [IncidentController::class, 'index']);
+        Route::post('/', [IncidentController::class, 'store'])->middleware('throttle:30,1');
+        Route::patch('/{incident}', [IncidentController::class, 'update'])->middleware('throttle:30,1');
+    });
     Route::get('/auth/me', [AuthController::class, 'me']);
     Route::patch('/auth/profile', [AuthController::class, 'updateProfile']);
     Route::post('/auth/logout', [AuthController::class, 'logout']);

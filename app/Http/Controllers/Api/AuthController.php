@@ -8,11 +8,46 @@ use App\Services\AuthSession;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Auth;
+use Laravel\Sanctum\PersonalAccessToken;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\ValidationException;
 
 class AuthController extends Controller
 {
+    public function webLogin(Request $request): JsonResponse
+    {
+        $credentials = $request->validate([
+            'email' => ['required', 'email'],
+            'password' => ['required', 'string'],
+            'remember' => ['sometimes', 'boolean'],
+        ]);
+
+        // Restrict roles before creating a session or a remember-me cookie.
+        if (! Auth::guard('web')->attempt([
+            'email' => $credentials['email'],
+            'password' => $credentials['password'],
+            'role' => User::ROLE_ADMIN,
+        ], $request->boolean('remember'))) {
+            throw ValidationException::withMessages([
+                'email' => ['The credentials are invalid or this account does not have administrator access.'],
+            ]);
+        }
+
+        $request->session()->regenerate();
+
+        return response()->json(['user' => AuthSession::payload(Auth::guard('web')->user())]);
+    }
+
+    public function webLogout(Request $request): JsonResponse
+    {
+        Auth::guard('web')->logout();
+        $request->session()->invalidate();
+        $request->session()->regenerateToken();
+
+        return response()->json(['message' => 'Signed out.']);
+    }
+
     /**
      * POST /api/auth/login
      */
@@ -30,6 +65,9 @@ class AuthController extends Controller
                 'email' => ['The provided credentials do not match our records.'],
             ]);
         }
+
+        abort_unless($user->hasRoleIn([User::ROLE_RESIDENT, User::ROLE_CAMP_MANAGER]), 403,
+            'Administrator accounts must sign in through the web portal.');
 
         return $this->respondWithToken($user);
     }
@@ -94,17 +132,29 @@ class AuthController extends Controller
             throw ValidationException::withMessages(['email' => 'The email for a Google-linked account cannot be changed here.']);
         }
 
+        $previousAvatar = $user->avatar;
+        $newAvatar = null;
         if ($request->hasFile('avatar')) {
-            // Replace the previous photo (if any) to avoid orphaned files.
-            if ($user->avatar) {
-                Storage::disk('public')->delete($user->avatar);
+            $newAvatar = $request->file('avatar')->store('avatars', 'public');
+            if (! $newAvatar) {
+                throw new \RuntimeException('The profile photo could not be stored.');
             }
-            $data['avatar'] = $request->file('avatar')->store('avatars', 'public');
+            $data['avatar'] = $newAvatar;
         } else {
             unset($data['avatar']);
         }
 
-        $user->update($data);
+        try {
+            $user->update($data);
+        } catch (\Throwable $exception) {
+            if ($newAvatar) {
+                Storage::disk('public')->delete($newAvatar);
+            }
+            throw $exception;
+        }
+        if ($newAvatar && $previousAvatar && $previousAvatar !== $newAvatar) {
+            Storage::disk('public')->delete($previousAvatar);
+        }
 
         return response()->json([
             'message' => 'Profile updated successfully.',
@@ -117,7 +167,12 @@ class AuthController extends Controller
      */
     public function logout(Request $request): JsonResponse
     {
-        $request->user()->currentAccessToken()?->delete();
+        $token = $request->user()->currentAccessToken();
+        if ($token instanceof PersonalAccessToken) {
+            $token->delete();
+        } else {
+            return $this->webLogout($request);
+        }
 
         return response()->json(['message' => 'Signed out.']);
     }

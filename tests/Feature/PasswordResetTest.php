@@ -379,6 +379,11 @@ class PasswordResetTest extends TestCase
     public function test_reset_password_revokes_existing_tokens(): void
     {
         $user = $this->makeUser();
+        $user->forceFill(['remember_token' => 'old-remember-token'])->save();
+        \Illuminate\Support\Facades\DB::table('sessions')->insert([
+            'id' => 'old-web-session', 'user_id' => $user->id,
+            'payload' => base64_encode('{}'), 'last_activity' => time(),
+        ]);
         $token = $user->createToken('test-token')->plainTextToken;
         $tokenId = explode('|', $token)[0];
 
@@ -408,6 +413,8 @@ class PasswordResetTest extends TestCase
             'id' => $tokenId,
             'tokenable_id' => $user->id,
         ]);
+        $this->assertDatabaseMissing('sessions', ['user_id' => $user->id]);
+        $this->assertNull($user->fresh()->remember_token);
     }
 
     public function test_full_recovery_flow_end_to_end(): void

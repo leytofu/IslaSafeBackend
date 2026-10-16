@@ -343,6 +343,8 @@ class PasswordResetController extends Controller
 
             // Revoke all API tokens
             $user->tokens()->delete();
+            DB::table('sessions')->where('user_id', $user->id)->delete();
+            $user->forceFill(['remember_token' => null])->save();
 
             // Mark authorization as used
             $authorization->update(['used' => true]);

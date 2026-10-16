@@ -21,7 +21,7 @@ class AuthTest extends TestCase
 
     public function test_login_returns_token_and_user_payload(): void
     {
-        $user = $this->makeUser();
+        $user = $this->makeUser(User::ROLE_RESIDENT);
 
         $response = $this->postJson('/api/auth/login', [
             'email' => $user->email,
@@ -30,7 +30,7 @@ class AuthTest extends TestCase
 
         $response->assertOk()
             ->assertJsonStructure(['token', 'user' => ['id', 'name', 'email', 'role']])
-            ->assertJsonPath('user.role', User::ROLE_ADMIN);
+            ->assertJsonPath('user.role', User::ROLE_RESIDENT);
     }
 
     public function test_login_rejects_wrong_password(): void

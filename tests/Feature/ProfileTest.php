@@ -114,6 +114,48 @@ class ProfileTest extends TestCase
             ->assertJsonValidationErrors(['avatar']);
     }
 
+    public function test_mobile_roles_can_upload_and_replace_photos_using_multipart_method_override(): void
+    {
+        Storage::fake('public');
+        \Symfony\Component\HttpFoundation\Request::enableHttpMethodParameterOverride();
+        $png = base64_decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==');
+        foreach ([User::ROLE_RESIDENT, User::ROLE_CAMP_MANAGER] as $role) {
+            $this->app['auth']->forgetGuards();
+            $user = User::factory()->create(['role' => $role]);
+            $token = $user->createToken('mobile-photo-test')->plainTextToken;
+            $other = User::factory()->create();
+            $previous = null;
+            for ($attempt = 0; $attempt < 2; $attempt++) {
+                $this->withToken($token)->withHeader('Accept', 'application/json')
+                    ->post('/api/auth/profile', [
+                        '_method' => 'PATCH', 'name' => $user->name, 'email' => $user->email,
+                        'avatar' => UploadedFile::fake()->createWithContent('profile.png', $png),
+                        'id' => $other->id,
+                    ])->assertOk()->assertJsonPath('user.id', $user->id);
+                $user->refresh();
+                Storage::disk('public')->assertExists($user->avatar);
+                if ($previous) Storage::disk('public')->assertMissing($previous);
+                $previous = $user->avatar;
+                $this->assertNull($other->fresh()->avatar);
+            }
+            $this->withToken($token)->getJson('http://10.0.2.2:8000/api/auth/me')
+                ->assertOk()->assertJsonPath('user.avatar_url', 'http://10.0.2.2:8000/storage/'.$user->avatar);
+        }
+    }
+
+    public function test_rejected_photo_replacement_keeps_the_existing_photo(): void
+    {
+        Storage::fake('public');
+        Storage::disk('public')->put('avatars/previous.png', 'existing photo');
+        $user = User::factory()->create(['avatar' => 'avatars/previous.png']);
+        $this->actingAs($user, 'sanctum')->patchJson('/api/auth/profile', [
+            'name' => $user->name, 'email' => $user->email,
+            'avatar' => UploadedFile::fake()->create('too-large.jpg', 2049, 'image/jpeg'),
+        ])->assertUnprocessable()->assertJsonValidationErrors(['avatar']);
+        $this->assertSame('avatars/previous.png', $user->fresh()->avatar);
+        Storage::disk('public')->assertExists('avatars/previous.png');
+    }
+
     public function test_profile_update_cannot_change_role_or_password(): void
     {
         $user = $this->makeUser();

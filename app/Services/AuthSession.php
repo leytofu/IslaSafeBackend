@@ -14,7 +14,11 @@ class AuthSession
             'id' => $user->id, 'name' => $user->name, 'email' => $user->email,
             'role' => $user->role, 'contact_number' => $user->contact_number,
             'office' => $user->office, 'jurisdiction' => $user->jurisdiction,
-            'avatar_url' => $user->avatar ? Storage::disk('public')->url($user->avatar) : null,
+            'avatar_url' => $user->avatar
+                ? (config('filesystems.disks.public.driver') === 'local'
+                    ? url('/storage/'.$user->avatar)
+                    : Storage::disk('public')->url($user->avatar))
+                : null,
             'has_local_password' => $user->password !== null,
             'google_linked' => $user->google_subject !== null,
             'barangay' => $user->barangay, 'address' => $user->address,
